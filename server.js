@@ -1,12 +1,8 @@
 /**
- * Orderly Starter (no-code-friendly "proof of life")
- * - Serves an embedded app page Shopify can iframe
- * - Includes placeholder OAuth callback route to satisfy Redirect URL
- * - Sets CSP so Shopify admin can embed the app
- *
- * NOTE: This is intentionally minimal. Next step after this loads:
- * - Add Shopify OAuth + session verification
- * - Build your real screens
+ * Orderly Starter → Settings MVP
+ * - Embedded app page loads inside Shopify Admin
+ * - Simple Settings screen
+ * - Saves settings per shop (in-memory for now)
  */
 
 const express = require("express");
@@ -16,10 +12,13 @@ const morgan = require("morgan");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Parse JSON bodies
+app.use(express.json());
+
+// Logging
 app.use(morgan("tiny"));
 
-// We do NOT use helmet's default CSP because Shopify needs iframe embedding.
-// We'll set CSP manually.
+// Shopify-friendly security headers (allow iframe embedding)
 app.use(
   helmet({
     contentSecurityPolicy: false,
@@ -27,23 +26,30 @@ app.use(
   })
 );
 
-// Allow Shopify Admin + Shop domains to iframe the app
+// In-memory settings store (per shop)
+// NOTE: This resets if Render restarts. We'll move to a DB later.
+const settingsByShop = new Map();
+
+function defaultSettings(shop) {
+  return {
+    shop,
+    brandName: "Orderly",
+    accent: "#16a34a",
+    notifyDelay: true,
+    notifyOutForDelivery: true,
+    notifyDelivered: true,
+  };
+}
+
+// Allow Shopify Admin + myshopify.com to iframe the app
 app.use((req, res, next) => {
-  // Shopify typically passes ?shop=your-store.myshopify.com
   const shop = req.query.shop;
 
-  // Allow admin.shopify.com and *.myshopify.com by default
-  const frameAncestors = [
-    "https://admin.shopify.com",
-    "https://*.myshopify.com",
-  ];
-
-  // If shop param exists and looks like a myshopify domain, add it explicitly too
+  const frameAncestors = ["https://admin.shopify.com", "https://*.myshopify.com"];
   if (typeof shop === "string" && shop.endsWith(".myshopify.com")) {
     frameAncestors.push(`https://${shop}`);
   }
 
-  // Set a Shopify-friendly CSP
   res.setHeader(
     "Content-Security-Policy",
     [
@@ -59,62 +65,210 @@ app.use((req, res, next) => {
   next();
 });
 
-// Main embedded app page
+/**
+ * API: Get settings for this shop
+ * GET /api/settings?shop=your-store.myshopify.com
+ */
+app.get("/api/settings", (req, res) => {
+  const shop = req.query.shop;
+  if (!shop || typeof shop !== "string") {
+    return res.status(400).json({ ok: false, error: "Missing ?shop=" });
+  }
+
+  const current = settingsByShop.get(shop) || defaultSettings(shop);
+  settingsByShop.set(shop, current);
+  return res.json({ ok: true, settings: current });
+});
+
+/**
+ * API: Save settings for this shop
+ * POST /api/settings?shop=your-store.myshopify.com
+ * body: { brandName, accent, notifyDelay, notifyOutForDelivery, notifyDelivered }
+ */
+app.post("/api/settings", (req, res) => {
+  const shop = req.query.shop;
+  if (!shop || typeof shop !== "string") {
+    return res.status(400).json({ ok: false, error: "Missing ?shop=" });
+  }
+
+  const prev = settingsByShop.get(shop) || defaultSettings(shop);
+  const body = req.body || {};
+
+  const next = {
+    ...prev,
+    brandName: typeof body.brandName === "string" ? body.brandName.slice(0, 40) : prev.brandName,
+    accent: typeof body.accent === "string" ? body.accent : prev.accent,
+    notifyDelay: Boolean(body.notifyDelay),
+    notifyOutForDelivery: Boolean(body.notifyOutForDelivery),
+    notifyDelivered: Boolean(body.notifyDelivered),
+  };
+
+  settingsByShop.set(shop, next);
+  return res.json({ ok: true, settings: next });
+});
+
+// Main embedded app page (Settings screen)
 app.get("/", (req, res) => {
-  const shop = req.query.shop || "(unknown shop)";
+  const shop = (req.query.shop || "").toString();
+
   res.status(200).send(`
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Orderly</title>
+  <title>Orderly Settings</title>
   <style>
     body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 0; background: #0b0f17; color: #e5e7eb; }
-    .wrap { max-width: 920px; margin: 0 auto; padding: 40px 20px; }
-    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 18px; padding: 22px; }
-    h1 { font-size: 28px; margin: 0 0 10px; }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 28px 16px; }
+    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 18px; padding: 18px; }
+    h1 { font-size: 22px; margin: 0 0 6px; }
     p { line-height: 1.5; margin: 10px 0; color: #cbd5e1; }
-    .pill { display: inline-block; padding: 6px 10px; border-radius: 999px; background: rgba(16,163,127,0.18); border: 1px solid rgba(16,163,127,0.35); color: #a7f3d0; font-size: 12px; }
-    .grid { display: grid; gap: 12px; grid-template-columns: 1fr; margin-top: 14px; }
-    @media(min-width: 840px){ .grid { grid-template-columns: 1fr 1fr; } }
+    .row { display: grid; gap: 12px; grid-template-columns: 1fr; margin-top: 14px; }
+    @media(min-width: 840px){ .row { grid-template-columns: 1fr 1fr; } }
+    label { display:block; font-size: 12px; color:#cbd5e1; margin-bottom: 6px; }
+    input[type="text"], input[type="color"] {
+      width: 100%; padding: 10px 12px; border-radius: 12px;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.15); color: #e5e7eb;
+    }
     .box { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.10); border-radius: 14px; padding: 14px; }
+    .toggle { display:flex; align-items:center; justify-content:space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .toggle:last-child { border-bottom: 0; }
+    .btn {
+      display:inline-flex; align-items:center; justify-content:center; gap:8px;
+      padding: 10px 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.06); color:#e5e7eb; cursor:pointer;
+    }
+    .btn.primary { border-color: rgba(16,163,127,0.6); background: rgba(16,163,127,0.18); }
+    .muted { color:#94a3b8; font-size: 12px; }
     code { color: #93c5fd; }
-    a { color: #93c5fd; }
+    .top { display:flex; align-items:flex-start; justify-content:space-between; gap: 10px; flex-wrap: wrap; }
+    .status { font-size: 12px; color: #a7f3d0; background: rgba(16,163,127,0.18); border: 1px solid rgba(16,163,127,0.35); padding: 6px 10px; border-radius: 999px; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card">
-      <div class="pill">✅ Orderly is live in Shopify</div>
-      <h1>Welcome to Orderly</h1>
-      <p>This page is your “proof of life” screen. If you can see this inside Shopify Admin, your app URL + embedding are working.</p>
-      <div class="grid">
-        <div class="box">
-          <strong>Connected shop</strong>
-          <p><code>${shop}</code></p>
+      <div class="top">
+        <div>
+          <div class="status">✅ Orderly Settings (MVP)</div>
+          <h1>Settings</h1>
+          <p class="muted">Shop: <code id="shopText"></code></p>
         </div>
-        <div class="box">
-          <strong>Next build step</strong>
-          <p>We’ll add a real Settings screen + carrier tracking next.</p>
+        <div style="display:flex; gap:10px;">
+          <button class="btn" id="reloadBtn">Reload</button>
+          <button class="btn primary" id="saveBtn">Save</button>
         </div>
       </div>
-      <p style="margin-top:16px;">You can now update Shopify to point to this URL (instead of example.com).</p>
+
+      <div class="row">
+        <div class="box">
+          <label>Brand name</label>
+          <input id="brandName" type="text" placeholder="Orderly" />
+          <p class="muted">This shows in Orderly emails / messages later.</p>
+        </div>
+
+        <div class="box">
+          <label>Accent color</label>
+          <input id="accent" type="color" />
+          <p class="muted">Used for buttons + highlights.</p>
+        </div>
+      </div>
+
+      <div class="box" style="margin-top:12px;">
+        <p style="margin:0 0 6px;"><strong>Customer notifications</strong></p>
+
+        <div class="toggle">
+          <div>
+            <div>Delay detected</div>
+            <div class="muted">Send if tracking shows a delay.</div>
+          </div>
+          <input id="notifyDelay" type="checkbox" />
+        </div>
+
+        <div class="toggle">
+          <div>
+            <div>Out for delivery</div>
+            <div class="muted">Send when package is out for delivery.</div>
+          </div>
+          <input id="notifyOutForDelivery" type="checkbox" />
+        </div>
+
+        <div class="toggle">
+          <div>
+            <div>Delivered</div>
+            <div class="muted">Send when package is delivered.</div>
+          </div>
+          <input id="notifyDelivered" type="checkbox" />
+        </div>
+      </div>
+
+      <p id="msg" class="muted" style="margin-top:12px;"></p>
     </div>
   </div>
+
+<script>
+  const params = new URLSearchParams(window.location.search);
+  const shop = params.get("shop") || "";
+  document.getElementById("shopText").textContent = shop || "(missing shop param)";
+
+  const msg = (t) => document.getElementById("msg").textContent = t;
+
+  async function loadSettings() {
+    if (!shop) { msg("Missing ?shop= in URL. Open app from Shopify Admin."); return; }
+    msg("Loading settings...");
+    const r = await fetch(\`/api/settings?shop=\${encodeURIComponent(shop)}\`);
+    const data = await r.json();
+    if (!data.ok) { msg("Error: " + (data.error || "unknown")); return; }
+
+    const s = data.settings;
+    document.getElementById("brandName").value = s.brandName || "Orderly";
+    document.getElementById("accent").value = s.accent || "#16a34a";
+    document.getElementById("notifyDelay").checked = !!s.notifyDelay;
+    document.getElementById("notifyOutForDelivery").checked = !!s.notifyOutForDelivery;
+    document.getElementById("notifyDelivered").checked = !!s.notifyDelivered;
+
+    msg("Loaded.");
+  }
+
+  async function saveSettings() {
+    if (!shop) { msg("Missing ?shop= in URL."); return; }
+    msg("Saving...");
+    const payload = {
+      brandName: document.getElementById("brandName").value,
+      accent: document.getElementById("accent").value,
+      notifyDelay: document.getElementById("notifyDelay").checked,
+      notifyOutForDelivery: document.getElementById("notifyOutForDelivery").checked,
+      notifyDelivered: document.getElementById("notifyDelivered").checked,
+    };
+
+    const r = await fetch(\`/api/settings?shop=\${encodeURIComponent(shop)}\`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    if (!data.ok) { msg("Save failed: " + (data.error || "unknown")); return; }
+
+    msg("✅ Saved! (If Render restarts, we’ll add a database next.)");
+  }
+
+  document.getElementById("saveBtn").addEventListener("click", saveSettings);
+  document.getElementById("reloadBtn").addEventListener("click", loadSettings);
+
+  loadSettings();
+</script>
 </body>
 </html>
   `);
 });
 
-// Placeholder OAuth callback route (Shopify expects this to exist because you added it in Redirect URLs)
+// Placeholder OAuth callback route (still here)
 app.get("/auth/callback", (req, res) => {
   res.status(200).send("Orderly starter: auth callback placeholder. Next step is implementing Shopify OAuth here.");
 });
 
-// Health check endpoint (useful for hosting providers)
+// Health check endpoint
 app.get("/health", (req, res) => res.json({ ok: true, service: "orderly-starter" }));
 
-app.listen(PORT, () => {
-  console.log(`Orderly starter listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Orderly starter listening on port ${PORT}`));
